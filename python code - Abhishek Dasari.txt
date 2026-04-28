@@ -1,0 +1,1011 @@
+"""
+8-BIT REVERSIBLE ALU SIMULATOR
+QCA Designer Mirror — Python Simulation
+RUN: python reversible_alu_gui.py
+"""
+
+import tkinter as tk
+from tkinter import ttk
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import numpy as np
+
+# ── Colors ────────────────────────────────────────────────────
+BG        = "#0a0a0a"
+BG2       = "#111111"
+BG3       = "#1a1a1a"
+ACCENT    = "#00cfff"
+GREEN     = "#2ca02c"
+PURPLE    = "#9467bd"
+YELLOW    = "#e6a817"
+RED       = "#ff4444"
+WHITE     = "#ffffff"
+GRAY      = "#888888"
+DARK_GRAY = "#333333"
+
+# ── Gate Logic ────────────────────────────────────────────────
+def feynman_gate(A, B):    return A, A ^ B
+def peres_gate(A, B, C):   return A, A ^ B, (A & B) ^ C
+def toffoli_gate(A, B, C): return A, B, (A & B) ^ C
+def fredkin_gate(C, A, B): return (C, B, A) if C else (C, A, B)
+
+def AND(a, b):  return a & b
+def OR(a, b):   return a | b
+def NOT(a):     return 1 - a
+def NAND(a, b): return NOT(AND(a, b))
+def NOR(a, b):  return NOT(OR(a, b))
+def XOR(a, b):  return a ^ b
+def XNOR(a, b): return NOT(XOR(a, b))
+
+def half_adder(A, B):
+    _, S, C = peres_gate(A, B, 0)
+    return S, C
+
+def full_adder(A, B, Cin):
+    return A ^ B ^ Cin, (A & B) | (B & Cin) | (A & Cin)
+
+def half_sub(A, B):
+    return XOR(A, B), AND(NOT(A), B)
+
+def full_sub(A, B, Bin):
+    D1, Br1 = half_sub(A, B)
+    D2, Br2 = half_sub(D1, Bin)
+    return D2, OR(Br1, Br2)
+
+def mux(A, B, S):
+    return OR(AND(A, NOT(S)), AND(B, S))
+
+def dec2x4(A, B):
+    return (AND(NOT(A),NOT(B)), AND(NOT(A),B), AND(A,NOT(B)), AND(A,B))
+
+def comp1bit(A, B):
+    return AND(A,NOT(B)), XNOR(A,B), AND(NOT(A),B)
+
+def ripple_carry(A, B, cin=0):
+    res, carry = [], cin
+    for a, b in zip(reversed(A), reversed(B)):
+        s, carry = full_adder(a, b, carry)
+        res.append(s)
+    res.append(carry)
+    return list(reversed(res))
+
+def to8(r):
+    r = list(r)
+    return r[-8:] if len(r) >= 8 else [0]*(8-len(r)) + r
+
+def bits_to_dec(r):
+    return int("".join(map(str, r)), 2)
+
+def bits_str(r):
+    return "".join(map(str, r))
+
+
+# ── Application ───────────────────────────────────────────────
+class App:
+
+    NEEDS_C_1BIT = {"Peres Gate","Toffoli Gate","Fredkin Gate","Full Adder","Full Subtractor","2:1 MUX"}
+    ONLY_A_1BIT  = {"NOT Gate"}
+
+    # 16 ALU operations with 4-bit opcodes
+    ALU_OPS = [
+        ("0000", "ADD",            "A + B"),
+        ("0001", "SUB",            "A - B"),
+        ("0010", "AND",            "A AND B"),
+        ("0011", "OR",             "A OR B"),
+        ("0100", "XOR",            "A XOR B"),
+        ("0101", "NOT A",          "NOT A  (B ignored)"),
+        ("0110", "NAND",           "NOT(A AND B)"),
+        ("0111", "NOR",            "NOT(A OR B)"),
+        ("1000", "XNOR",           "NOT(A XOR B)"),
+        ("1001", "LEFT SHIFT",     "A << B[2:0]"),
+        ("1010", "RIGHT SHIFT",    "A >> B[2:0]"),
+        ("1011", "INCREMENT",      "A + 1  (B ignored)"),
+        ("1100", "DECREMENT",      "A - 1  (B ignored)"),
+        ("1101", "2s COMPLEMENT",  "NOT(A)+1  (B ignored)"),
+        ("1110", "COMPARE",        "A vs B  (flags only)"),
+        ("1111", "PASS A",         "A  (buffer, B ignored)"),
+    ]
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("8-Bit Reversible ALU — QCA Designer Mirror")
+        self.root.configure(bg=BG)
+        self.root.geometry("1150x780")
+        self.root.resizable(True, True)
+
+        self.gate_var  = tk.StringVar(value="Feynman Gate")
+        self.in_a      = tk.StringVar(value="0")
+        self.in_b      = tk.StringVar(value="0")
+        self.in_c      = tk.StringVar(value="0")
+        self.in_8a     = tk.StringVar(value="10110110")  # 182
+        self.in_8b     = tk.StringVar(value="01101001")  # 105
+        self.in_adec   = tk.StringVar(value="182")
+        self.in_bdec   = tk.StringVar(value="105")
+        self.opcode    = tk.StringVar(value="0000")      # ADD
+
+        self.in_8a.trace_add("write", lambda *_: self.root.after(300, self._sync_dec_a))
+        self.in_8b.trace_add("write", lambda *_: self.root.after(300, self._sync_dec_b))
+
+        self._build_ui()
+
+    # ── UI Construction ───────────────────────────────────────
+
+    def _build_ui(self):
+        hdr = tk.Frame(self.root, bg=ACCENT, height=55)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="⬡  8-BIT REVERSIBLE ALU SIMULATOR",
+                 bg=ACCENT, fg=BG, font=("Courier",16,"bold")).pack(side="left", padx=20)
+        tk.Label(hdr, text="QCA Designer Mirror  |  Python Simulation",
+                 bg=ACCENT, fg=BG, font=("Courier",9)).pack(side="right", padx=20)
+
+        main = tk.Frame(self.root, bg=BG)
+        main.pack(fill="both", expand=True, padx=10, pady=10)
+
+        left = tk.Frame(main, bg=BG2, width=330)
+        left.pack(side="left", fill="y", padx=(0,10))
+        left.pack_propagate(False)
+
+        right = tk.Frame(main, bg=BG)
+        right.pack(side="right", fill="both", expand=True)
+
+        self._build_left(left)
+        self._build_right(right)
+
+    def _sec(self, parent, text):
+        f = tk.Frame(parent, bg=BG)
+        f.pack(fill="x", padx=5, pady=(10,2))
+        tk.Label(f, text=f"  {text}", bg=ACCENT, fg=BG,
+                 font=("Courier",8,"bold"), pady=3).pack(fill="x")
+
+    def _build_left(self, parent):
+        self._sec(parent, "SELECT CIRCUIT")
+        gates = [
+            "── REVERSIBLE GATES ──","Feynman Gate","Peres Gate","Toffoli Gate","Fredkin Gate",
+            "── ADDERS ──","Half Adder","Full Adder",
+            "── LOGIC GATES ──","AND Gate","OR Gate","NOT Gate","NAND Gate","NOR Gate","XOR Gate","XNOR Gate",
+            "── ARITHMETIC ──","Half Subtractor","Full Subtractor",
+            "── COMBINATIONAL ──","2:1 MUX","2:4 Decoder","1-bit Comparator",
+            "── 8-BIT ALU ──",
+            "8-bit ALU",
+        ]
+        sty = ttk.Style()
+        sty.theme_use("clam")
+        sty.configure("C.TCombobox",
+                      fieldbackground="#111111", background="#111111",
+                      foreground="#ffffff", selectbackground="#00cfff",
+                      selectforeground="#000000", bordercolor="#00cfff",
+                      lightcolor="#111111", darkcolor="#111111", arrowcolor="#ffffff")
+        sty.map("C.TCombobox",
+                fieldbackground=[("readonly","#111111")],
+                foreground=[("readonly","#ffffff")],
+                background=[("readonly","#111111")])
+        self.combo = ttk.Combobox(parent, textvariable=self.gate_var,
+                                   values=gates, state="readonly",
+                                   style="C.TCombobox", font=("Courier",10), width=28)
+        self.combo.pack(padx=15, pady=8, fill="x")
+        self.combo.bind("<<ComboboxSelected>>", self._gate_changed)
+
+        # ── 1-bit inputs ──
+        self._sec(parent, "INPUTS")
+
+        # Container keeps A/B/C rows in fixed position always
+        self.frm_inputs = tk.Frame(parent, bg=BG2)
+        self.frm_inputs.pack(fill="x", padx=15, pady=2)
+
+        # Input A row (always visible)
+        self.row_a = tk.Frame(self.frm_inputs, bg=BG2)
+        self.row_a.pack(fill="x", pady=2)
+        tk.Label(self.row_a, text="Input A:", fg=GRAY, bg=BG2,
+                 font=("Courier",10), width=10).pack(side="left")
+        for v in ["0","1"]:
+            tk.Radiobutton(self.row_a, text=v, variable=self.in_a, value=v,
+                           bg=BG2, fg=ACCENT, selectcolor=BG, activebackground=BG2,
+                           font=("Courier",11,"bold"),
+                           command=self._simulate).pack(side="left", padx=8)
+
+        # Input B row (hidden for NOT Gate)
+        self.row_b = tk.Frame(self.frm_inputs, bg=BG2)
+        self.row_b.pack(fill="x", pady=2)
+        tk.Label(self.row_b, text="Input B:", fg=GRAY, bg=BG2,
+                 font=("Courier",10), width=10).pack(side="left")
+        for v in ["0","1"]:
+            tk.Radiobutton(self.row_b, text=v, variable=self.in_b, value=v,
+                           bg=BG2, fg=ACCENT, selectcolor=BG, activebackground=BG2,
+                           font=("Courier",11,"bold"),
+                           command=self._simulate).pack(side="left", padx=8)
+
+        # Input C row (hidden unless gate needs it)
+        self.row_c = tk.Frame(self.frm_inputs, bg=BG2)
+        self.row_c.pack(fill="x", pady=2)
+        tk.Label(self.row_c, text="Input C:", fg=GRAY, bg=BG2,
+                 font=("Courier",10), width=10).pack(side="left")
+        for v in ["0","1"]:
+            tk.Radiobutton(self.row_c, text=v, variable=self.in_c, value=v,
+                           bg=BG2, fg=ACCENT, selectcolor=BG, activebackground=BG2,
+                           font=("Courier",11,"bold"),
+                           command=self._simulate).pack(side="left", padx=8)
+
+        # ── 8-bit ALU inputs ──
+        # Wrap heading + inputs in ONE container → show/hide together
+        self.frm_8_outer = tk.Frame(parent, bg=BG2)
+        # NOT packed here — _apply_visibility controls it
+        tk.Label(self.frm_8_outer, text="  8-BIT ALU INPUTS",
+                 bg=ACCENT, fg=BG, font=("Courier",8,"bold"),
+                 pady=3).pack(fill="x", padx=5, pady=(10,2))
+        self.frm_8 = tk.Frame(self.frm_8_outer, bg=BG2)
+        self.frm_8.pack(fill="x", padx=15, pady=4)
+
+        # Opcode selector
+        tk.Label(self.frm_8, text="Opcode (4-bit):",
+                 fg=GRAY, bg=BG2, font=("Courier",9)).pack(anchor="w")
+        self.frm_opcode = tk.Frame(self.frm_8, bg=BG2)
+        self.frm_opcode.pack(fill="x", pady=2)
+        self.opcode_btns = []
+        for i in range(4):
+            b = tk.Label(self.frm_opcode, text="0",
+                         bg=BG3, fg=ACCENT,
+                         font=("Courier",16,"bold"),
+                         width=3, relief="flat",
+                         cursor="hand2")
+            b.pack(side="left", padx=2)
+            b.bind("<Button-1>", lambda e, idx=i: self._toggle_opcode(idx))
+            self.opcode_btns.append(b)
+
+        self.opcode_name_lbl = tk.Label(self.frm_8,
+                 text="0000 → ADD",
+                 fg=YELLOW, bg=BG2,
+                 font=("Courier",10,"bold"))
+        self.opcode_name_lbl.pack(anchor="w", pady=2)
+
+        # Compact opcode reference (scrollable text box)
+        self.frm_optable = tk.Frame(self.frm_8, bg=BG2)
+        self.frm_optable.pack(fill="x", pady=2)
+        op_txt = tk.Text(self.frm_optable, bg=BG3, fg=GRAY,
+                         font=("Courier",7), height=5,
+                         relief="flat", state="normal")
+        op_txt.pack(fill="x")
+        for code, name, desc in self.ALU_OPS:
+            op_txt.insert("end", " " + code + "  " + f"{name:<16}" + " " + desc + "\n")
+        op_txt.config(state="disabled")
+
+        # A input
+        tk.Label(self.frm_8, text="A (8 binary digits):",
+                 fg=GRAY, bg=BG2, font=("Courier",9)).pack(anchor="w", pady=(6,0))
+        tk.Entry(self.frm_8, textvariable=self.in_8a,
+                 bg=BG3, fg=ACCENT, font=("Courier",11),
+                 insertbackground=ACCENT, relief="flat").pack(fill="x", pady=2)
+
+        # A decimal input
+        frm_adec = tk.Frame(self.frm_8, bg=BG2)
+        frm_adec.pack(fill="x", pady=(0,4))
+        tk.Label(frm_adec, text="A decimal:", fg=DARK_GRAY, bg=BG2,
+                 font=("Courier",8), width=10).pack(side="left")
+        adec_entry = tk.Entry(frm_adec, textvariable=self.in_adec,
+                              bg=BG3, fg=ACCENT, font=("Courier",11),
+                              insertbackground=ACCENT, relief="flat", width=6)
+        adec_entry.pack(side="left", padx=4)
+        adec_entry.bind("<Return>",   lambda e: self._dec_to_bin("a"))
+        adec_entry.bind("<FocusOut>", lambda e: self._dec_to_bin("a"))
+        tk.Label(frm_adec, text="(0–255)", fg=DARK_GRAY, bg=BG2,
+                 font=("Courier",7)).pack(side="left")
+
+        # B input
+        tk.Label(self.frm_8, text="B (8 binary digits):",
+                 fg=GRAY, bg=BG2, font=("Courier",9)).pack(anchor="w")
+        tk.Entry(self.frm_8, textvariable=self.in_8b,
+                 bg=BG3, fg=GREEN, font=("Courier",11),
+                 insertbackground=GREEN, relief="flat").pack(fill="x", pady=2)
+
+        # B decimal input
+        frm_bdec = tk.Frame(self.frm_8, bg=BG2)
+        frm_bdec.pack(fill="x", pady=(0,4))
+        tk.Label(frm_bdec, text="B decimal:", fg=DARK_GRAY, bg=BG2,
+                 font=("Courier",8), width=10).pack(side="left")
+        bdec_entry = tk.Entry(frm_bdec, textvariable=self.in_bdec,
+                              bg=BG3, fg=GREEN, font=("Courier",11),
+                              insertbackground=GREEN, relief="flat", width=6)
+        bdec_entry.pack(side="left", padx=4)
+        bdec_entry.bind("<Return>",   lambda e: self._dec_to_bin("b"))
+        bdec_entry.bind("<FocusOut>", lambda e: self._dec_to_bin("b"))
+        tk.Label(frm_bdec, text="(0–255)", fg=DARK_GRAY, bg=BG2,
+                 font=("Courier",7)).pack(side="left")
+
+        tk.Label(self.frm_8, text="For SHIFT: B lower 3 bits = shift count",
+                 fg=DARK_GRAY, bg=BG2, font=("Courier",7)).pack(anchor="w")
+
+        # ── Buttons ──
+        tk.Button(parent, text="▶  SIMULATE", bg=ACCENT, fg=BG,
+                  font=("Courier",12,"bold"), relief="flat", cursor="hand2",
+                  activebackground=WHITE, command=self._simulate,
+                  pady=10).pack(padx=15, pady=15, fill="x")
+        tk.Button(parent, text="⊞  TRUTH TABLE", bg=BG3, fg=GREEN,
+                  font=("Courier",11,"bold"), relief="flat", cursor="hand2",
+                  activebackground=DARK_GRAY, command=self._truth_table,
+                  pady=8).pack(padx=15, pady=5, fill="x")
+        tk.Button(parent, text="∿  WAVEFORM", bg=BG3, fg=YELLOW,
+                  font=("Courier",11,"bold"), relief="flat", cursor="hand2",
+                  activebackground=DARK_GRAY, command=self._waveform_popup,
+                  pady=8).pack(padx=15, pady=5, fill="x")
+
+        # ── Clock zones ──
+        self._sec(parent, "CLOCK ZONES")
+        self.zone_frm = tk.Frame(parent, bg=BG2)
+        self.zone_frm.pack(fill="x", padx=5, pady=2)
+        self._zones("Feynman Gate")
+
+        # Initial visibility
+        self.root.after(100, self._apply_visibility)
+
+    def _build_right(self, parent):
+        self._sec(parent, "SIMULATION OUTPUT")
+        self.out = tk.Text(parent, bg=BG3, fg=ACCENT, font=("Courier",11),
+                           height=10, relief="flat", state="disabled")
+        self.out.pack(fill="x", padx=5, pady=5)
+
+        self._sec(parent, "GATE INFORMATION")
+        self.info = tk.Text(parent, bg=BG3, fg=GRAY, font=("Courier",9),
+                            height=6, relief="flat", state="disabled")
+        self.info.pack(fill="x", padx=5, pady=5)
+
+        self._sec(parent, "LIVE WAVEFORM")
+        self.wave_frm = tk.Frame(parent, bg=BG3)
+        self.wave_frm.pack(fill="both", expand=True, padx=5, pady=5)
+
+        self._draw_wave("Feynman Gate")
+        self._update_info("Feynman Gate")
+
+    # ── Visibility Control ────────────────────────────────────
+
+    def _apply_visibility(self):
+        gate = self.gate_var.get()
+        is_8bit   = gate == "8-bit ALU"
+        needs_c   = gate in self.NEEDS_C_1BIT
+        only_a_1  = gate in self.ONLY_A_1BIT
+
+        # Show/hide entire rows for 1-bit inputs
+        if is_8bit:
+            self.frm_inputs.pack_forget()  # hide ALL 1-bit inputs
+        else:
+            self.frm_inputs.pack(fill="x", padx=15, pady=2)
+            # B row: hide for NOT Gate
+            if only_a_1:
+                self.row_b.pack_forget()
+            else:
+                self.row_b.pack(fill="x", padx=15, pady=4)
+            # C row: show only when needed
+            if needs_c:
+                self.row_c.pack(fill="x", padx=15, pady=4)
+            else:
+                self.row_c.pack_forget()
+
+        # Show/hide 8-bit frame (outer includes heading + inputs)
+        if is_8bit:
+            self.frm_8_outer.pack(fill="x")
+        else:
+            self.frm_8_outer.pack_forget()
+
+    def _toggle_opcode(self, idx):
+        """Toggle one opcode bit and update label"""
+        bits = list(self.opcode.get())
+        bits[idx] = "1" if bits[idx] == "0" else "0"
+        code = "".join(bits)
+        self.opcode.set(code)
+        self.opcode_btns[idx].config(
+            text=bits[idx],
+            fg=GREEN if bits[idx]=="1" else ACCENT
+        )
+        # Update name label
+        op_map = {c:n for c,n,_ in self.ALU_OPS}
+        name = op_map.get(code, "???")
+        self.opcode_name_lbl.config(text=f"{code} → {name}")
+        self._simulate()
+
+    def _gate_changed(self, event=None):
+        gate = self.gate_var.get()
+        if gate.startswith("──"):
+            return
+        self._apply_visibility()
+        self._update_info(gate)
+        self._zones(gate)
+        self._simulate()
+
+    # ── Helpers ───────────────────────────────────────────────
+
+    def _get_abc(self):
+        try:    return int(self.in_a.get()), int(self.in_b.get()), int(self.in_c.get())
+        except: return 0, 0, 0
+
+    def _get_8(self):
+        try:    A = [int(x) for x in self.in_8a.get().zfill(8)[:8]]
+        except: A = [1,0,1,1,0,1,1,0]
+        try:    B = [int(x) for x in self.in_8b.get().zfill(8)[:8]]
+        except: B = [0,1,1,0,1,0,0,1]
+        return A, B
+
+    def _sync_dec_a(self):
+        """Sync decimal box when binary A is typed"""
+        try:
+            val = int(self.in_8a.get().zfill(8)[:8], 2)
+            self.in_adec.set(str(val))
+        except: pass
+        self._simulate()
+
+    def _sync_dec_b(self):
+        """Sync decimal box when binary B is typed"""
+        try:
+            val = int(self.in_8b.get().zfill(8)[:8], 2)
+            self.in_bdec.set(str(val))
+        except: pass
+        self._simulate()
+
+    def _get_opcode(self):
+        return self.opcode.get()
+
+    def _get_shift_from_b(self, B):
+        """Lower 3 bits of B = shift count"""
+        return max(1, int("".join(map(str, B[-3:])), 2) or 1)
+
+    def _dec_to_bin(self, which):
+        """Convert decimal input to binary and update binary entry"""
+        try:
+            if which == "a":
+                val = max(0, min(255, int(self.in_adec.get())))
+                self.in_8a.set(format(val, "08b"))
+                self.in_adec.set(str(val))
+            else:
+                val = max(0, min(255, int(self.in_bdec.get())))
+                self.in_8b.set(format(val, "08b"))
+                self.in_bdec.set(str(val))
+            self._simulate()
+        except:
+            pass
+
+    # ── Compute ───────────────────────────────────────────────
+
+    def _compute(self, gate, A, B, C):
+        if gate == "Feynman Gate":
+            P,Q = feynman_gate(A,B)
+            return {"P=A (garbage)":P, "Q=A⊕B":Q}
+        elif gate == "Peres Gate":
+            P,Q,R = peres_gate(A,B,C)
+            return {"P=A (garbage)":P, "Q=A⊕B":Q, "R=AB⊕C":R}
+        elif gate == "Toffoli Gate":
+            P,Q,R = toffoli_gate(A,B,C)
+            return {"P=A (garbage)":P, "Q=B (garbage)":Q, "R=AB⊕C":R}
+        elif gate == "Fredkin Gate":
+            P,Q,R = fredkin_gate(C,A,B)
+            return {"P=C (garbage)":P, "Q":Q, "R":R}
+        elif gate == "Half Adder":
+            S,Co = half_adder(A,B)
+            return {"SUM":S, "CARRY":Co}
+        elif gate == "Full Adder":
+            S,Co = full_adder(A,B,C)
+            return {"SUM":S, "COUT":Co}
+        elif gate == "AND Gate":   return {"OUT": AND(A,B)}
+        elif gate == "OR Gate":    return {"OUT": OR(A,B)}
+        elif gate == "NOT Gate":   return {"OUT": NOT(A)}
+        elif gate == "NAND Gate":  return {"OUT": NAND(A,B)}
+        elif gate == "NOR Gate":   return {"OUT": NOR(A,B)}
+        elif gate == "XOR Gate":   return {"OUT": XOR(A,B)}
+        elif gate == "XNOR Gate":  return {"OUT": XNOR(A,B)}
+        elif gate == "Half Subtractor":
+            D,Br = half_sub(A,B)
+            return {"DIFF":D, "BORROW":Br}
+        elif gate == "Full Subtractor":
+            D,Br = full_sub(A,B,C)
+            return {"DIFF":D, "BORROW":Br}
+        elif gate == "2:1 MUX":    return {"OUT": mux(A,B,C)}
+        elif gate == "2:4 Decoder":
+            Y = dec2x4(A,B)
+            return {f"Y{i}":Y[i] for i in range(4)}
+        elif gate == "1-bit Comparator":
+            gt,eq,lt = comp1bit(A,B)
+            return {"A>B":gt, "A=B":eq, "A<B":lt}
+        elif gate == "8-bit ALU":
+            return self._compute8()
+        return {}
+
+    def _compute8(self):
+        A, B  = self._get_8()
+        ad    = bits_to_dec(A)
+        bd    = bits_to_dec(B)
+        code  = self._get_opcode()
+        op_map = {c:n for c,n,_ in self.ALU_OPS}
+        op    = op_map.get(code, "ADD")
+
+        carry_out  = 0
+        overflow   = 0
+
+        if op == "ADD":
+            r9        = ripple_carry(A, B)
+            carry_out = r9[0]
+            r         = r9[1:]
+            # Overflow: MSB of A and B same but result MSB differs
+            overflow  = 1 if (A[0]==B[0]) and (r[0]!=A[0]) else 0
+            op_str    = f"{ad} + {bd}"
+
+        elif op == "SUB":
+            r9        = ripple_carry(A, [NOT(b) for b in B], cin=1)
+            carry_out = r9[0]  # carry=1 means no borrow (positive result)
+            r         = r9[1:]
+            overflow  = 1 if (A[0]!=B[0]) and (r[0]!=A[0]) else 0
+            op_str    = f"{ad} - {bd}"
+
+        elif op == "AND":
+            r      = [AND(a,b) for a,b in zip(A,B)]
+            op_str = f"{ad} AND {bd}"
+
+        elif op == "OR":
+            r      = [OR(a,b) for a,b in zip(A,B)]
+            op_str = f"{ad} OR {bd}"
+
+        elif op == "XOR":
+            r      = [XOR(a,b) for a,b in zip(A,B)]
+            op_str = f"{ad} XOR {bd}"
+
+        elif op == "NOT A":
+            r      = [NOT(a) for a in A]
+            op_str = f"NOT {ad}"
+
+        elif op == "NAND":
+            r      = [NOT(AND(a,b)) for a,b in zip(A,B)]
+            op_str = f"NAND({ad},{bd})"
+
+        elif op == "NOR":
+            r      = [NOT(OR(a,b)) for a,b in zip(A,B)]
+            op_str = f"NOR({ad},{bd})"
+
+        elif op == "XNOR":
+            r      = [NOT(XOR(a,b)) for a,b in zip(A,B)]
+            op_str = f"XNOR({ad},{bd})"
+
+        elif op == "LEFT SHIFT":
+            sh     = self._get_shift_from_b(B)
+            r      = to8((A+[0]*sh)[sh:sh+8])
+            op_str = f"{ad} << {sh}  (B[2:0]={bits_str(B[-3:])}={sh})"
+
+        elif op == "RIGHT SHIFT":
+            sh     = self._get_shift_from_b(B)
+            r      = to8(([0]*sh+A)[:8])
+            op_str = f"{ad} >> {sh}  (B[2:0]={bits_str(B[-3:])}={sh})"
+
+        elif op == "INCREMENT":
+            r9        = ripple_carry(A, [0]*7+[1])
+            carry_out = r9[0]
+            r         = r9[1:]
+            op_str    = f"{ad} + 1"
+
+        elif op == "DECREMENT":
+            r9        = ripple_carry(A, [1]*8)
+            carry_out = r9[0]  # carry=1 means no borrow, carry=0 means borrow
+            r         = r9[1:]
+            op_str    = f"{ad} - 1"
+
+        elif op == "2s COMPLEMENT":
+            r9        = ripple_carry([NOT(a) for a in A], [0]*7+[1])
+            carry_out = r9[0]  # ADD style, no invert needed
+            r         = r9[1:]
+            op_str    = f"NOT({ad}) + 1"
+
+        elif op == "COMPARE":
+            # Internally does A - B to set flags correctly
+            r9        = ripple_carry(A, [NOT(b) for b in B], cin=1)
+            carry_out = NOT(r9[0])   # same as SUB
+            r         = r9[1:]
+            overflow  = 1 if (A[0]!=B[0]) and (r[0]!=A[0]) else 0
+            op_str    = f"{ad} vs {bd}"
+
+        elif op == "PASS A":
+            r      = list(A)
+            op_str = f"Pass A={ad}"
+
+        else:
+            r      = list(A)
+            op_str = f"{ad}"
+
+        rd       = bits_to_dec(r)
+        zero     = 1 if rd == 0 else 0
+        negative = r[0]   # MSB
+
+        # For COMPARE override flags meaningfully
+        if op == "COMPARE":
+            # Same as SUB: C=1 means no borrow (A >= B), C=0 means borrow (A < B)
+            cmp_zero     = 1 if ad == bd else 0
+            cmp_negative = 1 if ad <  bd else 0
+            cmp_carry    = 1 if ad >= bd else 0   # C=1 no borrow, C=0 borrow
+            return {
+                "Opcode":     f"{code} → {op}",
+                "Operation":  op_str,
+                f"A = {ad}":  bits_str(A),
+                f"B = {bd}":  bits_str(B),
+                "──────────": "──────────────────",
+                "A > B":      "1  ✓" if ad >  bd else "0",
+                "A = B":      "1  ✓" if ad == bd else "0",
+                "A < B":      "1  ✓" if ad <  bd else "0",
+                "── FLAGS ──": "──────────────────",
+                "Zero":       "1  ✓" if cmp_zero     else "0",
+                "Carry":      "1  ✓" if cmp_carry    else "0",
+                "Negative":   "1  ✓" if cmp_negative else "0",
+                "Overflow":   "1  ✓" if overflow     else "0",
+            }
+
+        return {
+            "Opcode":      f"{code} → {op}",
+            "Operation":   op_str,
+            f"A = {ad}":   bits_str(A),
+            f"B = {bd}":   bits_str(B),
+            "──────────":  "──────────────────",
+            f"Result={rd}":bits_str(r),
+            "Binary":      bits_str(r),
+            "Decimal":     str(rd),
+            "── FLAGS ──": "──────────────────",
+            "Zero":        "1  ✓" if zero     else "0",
+            "Carry":       "1  ✓" if carry_out else "0",
+            "Negative":    "1  ✓" if negative  else "0",
+            "Overflow":    "1  ✓" if overflow  else "0",
+        }
+
+    # ── Simulate ──────────────────────────────────────────────
+
+    def _simulate(self):
+        gate = self.gate_var.get()
+        if gate.startswith("──"):
+            return
+        A, B, C = self._get_abc()
+        result  = self._compute(gate, A, B, C)
+        self._show_output(gate, A, B, C, result)
+        self._draw_wave(gate)
+
+    def _alu_simulate(self):
+        """Called when opcode changes"""
+        self._simulate()
+
+    # ── Output Display ────────────────────────────────────────
+
+    def _show_output(self, gate, A, B, C, result):
+        self.out.config(state="normal")
+        self.out.delete("1.0","end")
+        self.out.insert("end", f"  Gate  :  {gate}\n", "T")
+
+        if gate != "8-bit ALU":
+            self.out.insert("end", f"  A     :  {A}\n")
+            if gate not in self.ONLY_A_1BIT:
+                self.out.insert("end", f"  B     :  {B}\n")
+            if gate in self.NEEDS_C_1BIT:
+                self.out.insert("end", f"  C     :  {C}\n")
+
+        self.out.insert("end", f"  {'─'*36}\n", "SEP")
+
+        for key, val in result.items():
+            if "─" in str(key):
+                self.out.insert("end", f"  {'─'*36}\n", "SEP")
+                continue
+            highlight = (
+                "Result" in str(key) or
+                str(key) in ["Decimal","Decimal (8-bit)","A > B","A = B","A < B","Carry out"]
+            )
+            self.out.insert("end", f"  {str(key):<24}: ", "G")
+            self.out.insert("end", f"{val}\n", "HI" if highlight else ("T" if key=="Binary" else "G"))
+
+        self.out.tag_config("T",   foreground=ACCENT, font=("Courier",11,"bold"))
+        self.out.tag_config("SEP", foreground=DARK_GRAY)
+        self.out.tag_config("G",   foreground=GRAY)
+        self.out.tag_config("HI",  foreground=GREEN, font=("Courier",11,"bold"))
+        self.out.tag_config("LO",  foreground=RED)
+        self.out.config(state="disabled")
+
+    # ── Gate Info ─────────────────────────────────────────────
+
+    def _update_info(self, gate):
+        INFO = {
+            "Feynman Gate":        "CNOT | 2 in, 2 out\nP=A (garbage)  Q=A⊕B\nQC=1 | Garbage=1",
+            "Peres Gate":          "3×3 | 3 in, 3 out\nP=A  Q=A⊕B  R=AB⊕C\nUse: Half Adder (C=0)\nQC=4 | Garbage=1",
+            "Toffoli Gate":        "CCNOT | 3 in, 3 out\nP=A  Q=B  R=AB⊕C\nUse: Carry generation\nQC=5 | Garbage=2",
+            "Fredkin Gate":        "CSWAP | 3 in, 3 out\nSwaps A,B when C=1\nQC=5 | Garbage=1",
+            "Half Adder":          "Peres Gate (C=0)\nSUM=A⊕B  CARRY=AB\nGarbage=1",
+            "Full Adder":          "Peres + Feynman + Toffoli\nSUM=A⊕B⊕Cin\nCOUT=AB+Cin(A⊕B)\nTotal QC=10",
+            "AND Gate":            "OUT=A AND B\nQCA: Majority gate C=0",
+            "OR Gate":             "OUT=A OR B\nQCA: Majority gate C=1",
+            "NOT Gate":            "1 INPUT ONLY — no B!\nOUT=NOT A",
+            "NAND Gate":           "OUT=NOT(A AND B)  Universal",
+            "NOR Gate":            "OUT=NOT(A OR B)   Universal",
+            "XOR Gate":            "OUT=A XOR B\n1 when inputs differ",
+            "XNOR Gate":           "OUT=NOT(A XOR B)\n1 when inputs same",
+            "Half Subtractor":     "DIFF=A⊕B\nBORROW=(NOT A) AND B",
+            "Full Subtractor":     "2 Half Subtractors\nInputs: A, B, Borrow_in",
+            "2:1 MUX":             "Sel=0 → OUT=A\nSel=1 → OUT=B",
+            "2:4 Decoder":         "Y0=A'B' Y1=A'B Y2=AB' Y3=AB",
+            "1-bit Comparator":    "Outputs: A>B  A=B  A<B",
+            "8-bit ALU":
+                "4-bit Opcode selects operation\n"
+                "Click opcode bits to toggle 0/1\n"
+                "\n"
+                "Inputs: A, B (8-bit each)\n"
+                "Shift: B lower 3 bits = count\n"
+                "\n"
+                "Flags output:\n"
+                "  Zero     = result is 0\n"
+                "  Carry    = carry out of MSB\n"
+                "  Negative = MSB of result\n"
+                "  Overflow = signed overflow",
+        }
+        t = INFO.get(gate, gate)
+        self.info.config(state="normal")
+        self.info.delete("1.0","end")
+        self.info.insert("end", t)
+        self.info.config(state="disabled")
+
+    # ── Clock Zones ───────────────────────────────────────────
+
+    ZONE_DATA = {
+        "Feynman Gate":    [(0,"#1a6faf","Input A, B"),(1,"#2ca02c","Gate cells"),(2,"#ff69b4","Wire cells"),(3,"#00cfff","P=A, Q=A⊕B")],
+        "Peres Gate":      [(0,"#1a6faf","Input A"),(1,"#2ca02c","Outer gate"),(2,"#ff69b4","Inner gate"),(3,"#00cfff","P, Q=A⊕B, R=AB⊕C")],
+        "Toffoli Gate":    [(0,"#2ca02c","Outer wires"),(1,"#ff69b4","Gate cells"),(2,"#00cfff","Inner cells"),(3,"#1a6faf","P=A, Q=B, R=AB⊕C")],
+        "Fredkin Gate":    [(0,"#1a6faf","Input A, B"),(1,"#2ca02c","Gate cells"),(2,"#ff69b4","Wire cells"),(3,"#00cfff","P=C, Q, R swapped")],
+        "Half Adder":      [(0,"#1a6faf","Input A, B"),(1,"#2ca02c","Peres C=0"),(2,"#ff69b4","Wires"),(3,"#00cfff","SUM, CARRY")],
+        "Full Adder":      [(0,"#1a6faf","A, B, Cin"),(1,"#2ca02c","Peres Gate"),(2,"#ff69b4","Feynman→SUM"),(3,"#00cfff","Toffoli→COUT")],
+        "AND Gate":        [(0,"#1a6faf","Inputs A, B"),(1,"#2ca02c","Majority C=0"),(2,"#ff69b4","A AND B")],
+        "OR Gate":         [(0,"#1a6faf","Inputs A, B"),(1,"#2ca02c","Majority C=1"),(2,"#ff69b4","A OR B")],
+        "NOT Gate":        [(0,"#1a6faf","Input A only"),(1,"#2ca02c","Inverter"),(2,"#ff69b4","NOT A")],
+        "NAND Gate":       [(0,"#1a6faf","Inputs A, B"),(1,"#2ca02c","AND cells"),(2,"#ff69b4","NOT cells"),(3,"#00cfff","NAND output")],
+        "NOR Gate":        [(0,"#1a6faf","Inputs A, B"),(1,"#2ca02c","OR cells"),(2,"#ff69b4","NOT cells"),(3,"#00cfff","NOR output")],
+        "XOR Gate":        [(0,"#1a6faf","Inputs A, B"),(1,"#2ca02c","Gate cells"),(2,"#ff69b4","Wires"),(3,"#00cfff","A XOR B")],
+        "XNOR Gate":       [(0,"#1a6faf","Inputs A, B"),(1,"#2ca02c","XOR cells"),(2,"#ff69b4","NOT cells"),(3,"#00cfff","XNOR output")],
+        "Half Subtractor": [(0,"#1a6faf","Inputs A, B"),(1,"#2ca02c","Gate cells"),(2,"#ff69b4","DIFF, BORROW")],
+        "Full Subtractor": [(0,"#1a6faf","A, B, Bin"),(1,"#2ca02c","Half Sub 1"),(2,"#ff69b4","Half Sub 2"),(3,"#00cfff","DIFF, BORROW")],
+        "2:1 MUX":         [(0,"#1a6faf","A, B, Sel"),(1,"#2ca02c","MUX cells"),(2,"#ff69b4","Wires"),(3,"#00cfff","Selected output")],
+        "2:4 Decoder":     [(0,"#1a6faf","Inputs A, B"),(1,"#2ca02c","Decoder"),(2,"#ff69b4","Wires"),(3,"#00cfff","Y0 Y1 Y2 Y3")],
+        "1-bit Comparator":[(0,"#1a6faf","Inputs A, B"),(1,"#2ca02c","Compare"),(2,"#ff69b4","Wires"),(3,"#00cfff","A>B A=B A<B")],
+    }
+
+    def _zones(self, gate):
+        for w in self.zone_frm.winfo_children():
+            w.destroy()
+        default = [(0,"#1a6faf","Inputs"),(1,"#2ca02c","Gate"),(2,"#ff69b4","Wires"),(3,"#00cfff","Outputs")]
+        for zn, col, desc in self.ZONE_DATA.get(gate, default):
+            row = tk.Frame(self.zone_frm, bg=BG2)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text="■", fg=col, bg=BG2, font=("Courier",12)).pack(side="left", padx=(0,4))
+            tk.Label(row, text=f"Zone {zn}", fg=col, bg=BG2, font=("Courier",8,"bold"), width=7).pack(side="left")
+            tk.Label(row, text=desc, fg=GRAY, bg=BG2, font=("Courier",8), anchor="w").pack(side="left")
+
+    # ── Waveform ──────────────────────────────────────────────
+
+    def _wave_data(self, gate):
+        only_a  = gate in self.ONLY_A_1BIT
+        needs_c = gate in self.NEEDS_C_1BIT
+        combos  = []
+        if only_a:
+            for a in range(2): combos.append((a,0,0))
+        elif needs_c:
+            for a in range(2):
+                for b in range(2):
+                    for c in range(2): combos.append((a,b,c))
+        else:
+            for a in range(2):
+                for b in range(2): combos.append((a,b,0))
+
+        sa = [c[0] for c in combos]
+        sb = [c[1] for c in combos]
+        sc = [c[2] for c in combos]
+
+        sample   = self._compute(gate,0,0,0)
+        out_keys = [k for k in sample if "─" not in str(k) and k not in
+                    ["Operation","Shift Count",f"A = {bits_to_dec([0]*8)}"]]
+        # Limit to numeric output keys
+        out_keys = [k for k in sample if "─" not in str(k)][:4]
+
+        out_sigs = {k:[] for k in out_keys}
+        for a,b,c in combos:
+            r = self._compute(gate,a,b,c)
+            for k in out_keys:
+                v = str(r.get(k,"0"))
+                try:    out_sigs[k].append(1 if "1" in v[:3] else 0)
+                except: out_sigs[k].append(0)
+
+        return sa, sb, sc, out_keys, out_sigs, only_a, needs_c
+
+    def _draw_wave(self, gate):
+        for w in self.wave_frm.winfo_children():
+            w.destroy()
+        if gate == "8-bit ALU":
+            self._draw_alu_summary()
+            return
+        self._plot_wave(gate, self.wave_frm, 7, None)
+
+    def _draw_alu_summary(self):
+        """Show all 16 opcode results for current A, B"""
+        A, B = self._get_8()
+        ad   = bits_to_dec(A)
+        bd   = bits_to_dec(B)
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        fig.patch.set_facecolor(BG3)
+        ax.set_facecolor(BG3)
+        ax.axis("off")
+
+        rows = []
+        for code, name, _ in self.ALU_OPS:
+            old = self.opcode.get()
+            self.opcode.set(code)
+            r = self._compute8()
+            self.opcode.set(old)
+            rd = r.get("Decimal", r.get(f"Result={bits_to_dec(to8([0]*8))}", "─"))
+            # Get actual decimal from result keys
+            for k in r:
+                if "Result=" in str(k):
+                    rd = str(k).replace("Result=","")
+                    break
+            rows.append([code, name, rd,
+                         r.get("Zero","─"),
+                         r.get("Carry","─"),
+                         r.get("Negative","─"),
+                         r.get("Overflow","─")])
+
+        current = self.opcode.get()
+        headers = ["Opcode","Operation","Result","Z","C","N","V"]
+        col_x   = [0.01, 0.12, 0.32, 0.55, 0.64, 0.73, 0.82]
+        y_start = 0.95
+        y_step  = 0.055
+
+        for i, h in enumerate(headers):
+            ax.text(col_x[i], y_start, h, color=ACCENT,
+                    fontsize=8, fontweight="bold",
+                    transform=ax.transAxes, fontfamily="monospace")
+
+        for row_i, row in enumerate(rows):
+            y = y_start - y_step*(row_i+1)
+            is_cur = row[0] == current
+            bg_col = "#1a2a1a" if is_cur else BG3
+            if is_cur:
+                ax.axhspan(y-0.01, y+0.04, color="#1a3a1a", alpha=0.8)
+            for col_i, val in enumerate(row):
+                col = GREEN if is_cur else (YELLOW if col_i==0 else WHITE)
+                v = str(val).replace("1  ✓","1")
+                ax.text(col_x[col_i], y, v, color=col,
+                        fontsize=7, transform=ax.transAxes,
+                        fontfamily="monospace")
+
+        ax.set_title(f"A={ad}  B={bd}  |  Current Opcode: {current} → {dict((c,n) for c,n,_ in self.ALU_OPS).get(current,'?')}",
+                     color=ACCENT, fontsize=9, pad=4)
+        plt.tight_layout()
+        cv = FigureCanvasTkAgg(fig, master=self.wave_frm)
+        cv.draw()
+        cv.get_tk_widget().pack(fill="both", expand=True)
+        plt.close(fig)
+
+    def _plot_wave(self, gate, container, fw, fh):
+        sa, sb, sc, out_keys, out_sigs, only_a, needs_c = self._wave_data(gate)
+        n      = len(sa)
+        n_in   = 1 if only_a else (3 if needs_c else 2)
+        n_rows = max(n_in + len(out_keys), 2)
+        fh     = fh or max(3, n_rows * 0.65)
+
+        fig, axes = plt.subplots(n_rows, 1, figsize=(fw, fh), sharex=True)
+        fig.patch.set_facecolor(BG3)
+        if n_rows == 1: axes = [axes]
+
+        def wave(s):
+            w = []
+            for v in s: w.extend([v,v])
+            return np.array(w)
+        def taxis(n):
+            t = []
+            for i in range(n): t.extend([i,i+1])
+            return np.array(t)
+
+        T   = taxis(n)
+        OC  = [YELLOW, RED, WHITE, PURPLE, GREEN, ACCENT]
+        sigs = [(wave(sa), ACCENT, "A (in)")]
+        if not only_a: sigs.append((wave(sb), GREEN, "B (in)"))
+        if needs_c:    sigs.append((wave(sc), PURPLE, "C (in)"))
+        for i, k in enumerate(out_keys):
+            sigs.append((wave(out_sigs[k]), OC[i%len(OC)], f"{k}\n(out)"))
+
+        for ax, (sig, col, lbl) in zip(axes, sigs):
+            ax.set_facecolor("#0f0f0f" if "(out)" in lbl else BG3)
+            ax.plot(T, sig, color=col, lw=2, drawstyle="steps-post")
+            ax.fill_between(T, sig, 0, color=col, alpha=0.15, step="post")
+            ax.set_ylim(-0.3, 1.3)
+            ax.set_yticks([0,1])
+            ax.set_yticklabels(["0","1"], color=col, fontsize=7)
+            ax.set_ylabel(lbl, color=col, fontsize=7, rotation=0, labelpad=50, va="center")
+            ax.spines[:].set_color(DARK_GRAY)
+            ax.tick_params(colors=DARK_GRAY)
+            ax.grid(axis="x", color=DARK_GRAY, linestyle="--", linewidth=0.4)
+
+        axes[-1].set_xticks(range(n+1))
+        axes[-1].set_xticklabels([f"t{i}" for i in range(n+1)], color=GRAY, fontsize=6)
+        axes[-1].set_xlabel("Input Combinations →", color=GRAY, fontsize=8)
+        fig.suptitle(f"{gate} — Waveform", color=ACCENT, fontsize=9, fontweight="bold")
+        plt.tight_layout(pad=0.4)
+        cv = FigureCanvasTkAgg(fig, master=container)
+        cv.draw()
+        cv.get_tk_widget().pack(fill="both", expand=True)
+        plt.close(fig)
+
+    # ── Truth Table ───────────────────────────────────────────
+
+    def _truth_table(self):
+        gate = self.gate_var.get()
+        if gate.startswith("──"): return
+        win = tk.Toplevel(self.root)
+        win.title(f"Truth Table — {gate}")
+        win.configure(bg=BG)
+        win.geometry("680x540")
+        tk.Label(win, text=f"  TRUTH TABLE — {gate}",
+                 bg=ACCENT, fg=BG, font=("Courier",12,"bold"), pady=8).pack(fill="x")
+        txt = tk.Text(win, bg=BG3, fg=ACCENT, font=("Courier",11),
+                      relief="flat", padx=15, pady=10)
+        txt.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # 8-bit gates — show current values + result
+        if gate == "8-bit ALU":
+            A, B = self._get_8()
+            ad   = bits_to_dec(A)
+            bd   = bits_to_dec(B)
+            txt.insert("end", f"  Current A = {ad}\n  {bits_str(A)}\n\n")
+            txt.insert("end", f"  Current B = {bd}\n  {bits_str(B)}\n\n")
+            code = self._get_opcode()
+            op_map = {c:n for c,n,_ in self.ALU_OPS}
+            op   = op_map.get(code,"ADD")
+            txt.insert("end", f"  Opcode = {code} → {op}\n\n")
+            txt.insert("end", f"  {'─'*38}\n")
+            r = self._compute8(gate)
+            for k, v in r.items():
+                if "─" in str(k): continue
+                txt.insert("end", f"  {str(k):<22}: {v}\n")
+            txt.insert("end", f"\n  Change A/B inputs to see different results.\n")
+            txt.config(state="disabled")
+            return
+
+        # 1-bit gates — full truth table
+        only_a  = gate in self.ONLY_A_1BIT
+        needs_c = gate in self.NEEDS_C_1BIT
+        sample  = self._compute(gate,0,0,0)
+        keys    = list(sample.keys())
+
+        if only_a:
+            txt.insert("end","  A  │  "+"  ".join(f"{k:>6}" for k in keys)+"\n")
+            txt.insert("end","  "+"─"*28+"\n")
+            for a in range(2):
+                r = self._compute(gate,a,0,0)
+                txt.insert("end",f"  {a}  │  "+"  ".join(f"{v:>6}" for v in r.values())+"\n")
+        elif needs_c:
+            txt.insert("end","  A  B  C  │  "+"  ".join(f"{k:>6}" for k in keys)+"\n")
+            txt.insert("end","  "+"─"*42+"\n")
+            for a in range(2):
+                for b in range(2):
+                    for c in range(2):
+                        r = self._compute(gate,a,b,c)
+                        txt.insert("end",f"  {a}  {b}  {c}  │  "+"  ".join(f"{v:>6}" for v in r.values())+"\n")
+        else:
+            txt.insert("end","  A  B  │  "+"  ".join(f"{k:>6}" for k in keys)+"\n")
+            txt.insert("end","  "+"─"*34+"\n")
+            for a in range(2):
+                for b in range(2):
+                    r = self._compute(gate,a,b,0)
+                    txt.insert("end",f"  {a}  {b}  │  "+"  ".join(f"{v:>6}" for v in r.values())+"\n")
+        txt.config(state="disabled")
+
+    # ── Waveform Popup ────────────────────────────────────────
+
+    def _waveform_popup(self):
+        gate = self.gate_var.get()
+        if gate.startswith("──"): return
+        win = tk.Toplevel(self.root)
+        win.title(f"Waveform — {gate}")
+        win.configure(bg=BG)
+        win.geometry("820x520")
+        tk.Label(win, text=f"  WAVEFORM — {gate}",
+                 bg=YELLOW, fg=BG, font=("Courier",12,"bold"), pady=8).pack(fill="x")
+        frm = tk.Frame(win, bg=BG)
+        frm.pack(fill="both", expand=True, padx=10, pady=10)
+        self._plot_wave(gate, frm, 9, None)
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app  = App(root)
+    root.mainloop()
